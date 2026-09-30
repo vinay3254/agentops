@@ -5,6 +5,10 @@ import subprocess
 from agentops import config
 
 
+class ComposeError(RuntimeError):
+    """A `docker compose` invocation exited non-zero."""
+
+
 def ensure_env_file() -> None:
     config.ENV_FILE.touch(exist_ok=True)
 
@@ -19,7 +23,13 @@ def compose(*args: str, check: bool = True, timeout: int = 300) -> subprocess.Co
         "--env-file", str(config.ENV_FILE),
         *args,
     ]
-    return subprocess.run(cmd, capture_output=True, text=True, check=check, timeout=timeout)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+    if check and result.returncode != 0:
+        stderr = (result.stderr or "")[-2000:]
+        raise ComposeError(
+            f"{' '.join(cmd)} failed with exit code {result.returncode}: {stderr}"
+        )
+    return result
 
 
 def set_env_var(name: str, value: str) -> None:

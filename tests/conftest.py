@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from agentops import config
-from agentops.compose import compose
+from agentops.compose import clear_env, compose
 
 
 def _wait_ports(timeout: float = 120.0) -> None:
@@ -24,6 +24,7 @@ def _wait_ports(timeout: float = 120.0) -> None:
 
 @pytest.fixture(scope="session")
 def stack():
+    clear_env()  # drop leftover fault variables from earlier (possibly crashed) runs
     compose("up", "-d", "--build")
     _wait_ports()
     yield
