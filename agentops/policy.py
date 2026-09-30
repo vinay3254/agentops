@@ -81,7 +81,7 @@ def _ps(args):
         return
     if args == ["-ef"]:
         return
-    if len(args) >= 2 and args[0] == "-eo":
+    if len(args) == 2 and args[0] == "-eo":
         fields = args[1].split(",")
         for field in fields:
             if not field or field not in PS_FIELDS_ALLOWED:

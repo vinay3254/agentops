@@ -90,6 +90,10 @@ def test_ps_allowed(cmd):
 
 @pytest.mark.parametrize("cmd", [
     "ps e", "ps auxe", "ps aeww", "ps -eo pid,cmd,environ", "ps -eo pid,cmd,",
+    # Fix round 2: -eo must be exactly two args
+    "ps -eo pid e", "ps -eo pid auxe", "ps -eo pid eww", "ps -eo pid -o environ",
+    "ps -eo pid,cmd e", "ps -eo pid,cmd --environ", "ps aux e", "ps -ef e",
+    "ps -eo pid,cmd extra",
 ])
 def test_ps_denied(cmd):
     with pytest.raises(PolicyError):
