@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import docker
-from docker.errors import NotFound
+from docker.errors import APIError, NotFound
 
 from agentops import config
 from agentops.compose import compose, set_env_var
@@ -60,20 +60,35 @@ class Executor:
         return out if code == 0 else f"[exit {code}]\n{out}"
 
     def restart(self, service: str) -> None:
-        self._container(service).restart(timeout=5)
+        c = self._container(service)
+        try:
+            c.restart(timeout=5)
+        except APIError as e:
+            raise ExecutorError(f"docker error while restarting {service}") from e
 
     def start(self, service: str) -> None:
         c = self._container(service)
-        if c.status == "paused":
-            c.unpause()
-        elif c.status != "running":
-            c.start()
+        try:
+            if c.status == "paused":
+                c.unpause()
+            elif c.status != "running":
+                c.start()
+        except APIError as e:
+            raise ExecutorError(f"docker error while starting {service}") from e
 
     def set_env(self, service: str, key: str, value: str) -> str:
         check_service(service)
         var = check_env(service, key, value)
+        env_file = config.ENV_FILE
+        snapshot = env_file.read_text() if env_file.exists() else ""
         set_env_var(var, value)
-        compose("up", "-d", "--force-recreate", "--no-deps", service)
+        try:
+            compose("up", "-d", "--force-recreate", "--no-deps", service)
+        except Exception as e:
+            env_file.write_text(snapshot)
+            raise ExecutorError(
+                f"failed to recreate {service}; configuration restored"
+            ) from e
         return f"set {key}={value} for {service} and recreated the container"
 
     def cleanup_files(self, service: str, path: str) -> str:
@@ -85,8 +100,7 @@ class Executor:
             raise ExecutorError(out.strip() or f"rm exited {code}")
         return f"removed {p}"
 
-    def kill_process(self, service: str, pid) -> str:
-        pid = check_pid(pid)
+    def _process_tree(self, service: str) -> tuple[set[int], dict[int, list[int]]]:
         code, out = self.exec(service, ["ps", "-eo", "pid=,ppid="])
         if code != 0:
             raise ExecutorError(out.strip())
@@ -98,6 +112,11 @@ class Executor:
                 p, pp = int(parts[0]), int(parts[1])
                 pids.add(p)
                 children.setdefault(pp, []).append(p)
+        return pids, children
+
+    def kill_process(self, service: str, pid) -> str:
+        pid = check_pid(pid)
+        pids, children = self._process_tree(service)
         if pid not in pids:
             raise PolicyError(f"pid {pid} is not running in {service}")
         tree, stack = [], [pid]
@@ -108,4 +127,8 @@ class Executor:
         if 1 in tree:
             raise PolicyError("refusing to kill PID 1")
         self.exec(service, ["kill", "-9", *map(str, tree)])
+        remaining, _ = self._process_tree(service)
+        alive = set(tree) & remaining
+        if alive:
+            raise ExecutorError(f"pids still running after kill: {sorted(alive)}")
         return f"killed {len(tree)} process(es): {sorted(tree)}"
