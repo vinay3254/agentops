@@ -166,3 +166,75 @@ def test_resume_unknown_run(tmp_path):
     agent, _, _, _ = make_agent(tmp_path, [])
     with pytest.raises(ValueError):
         agent.resume("missing")
+
+
+def test_verifier_exception_is_handled(tmp_path):
+    state = {"n": 0}
+
+    def verify():
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("boom")
+        return HEALTHY
+
+    agent, trace, _, _ = make_agent(
+        tmp_path,
+        [reply(calls=[("finish", {"summary": "a"})]), reply(calls=[("finish", {"summary": "b"})])],
+        verify=verify,
+    )
+    res = agent.run("i", "x", run_id="r1")
+    assert res.success and res.stop_reason == "finished" and res.summary == "b"
+    events = trace.events(run_id="r1")
+    first = [e for e in events if e["type"] == "tool_result"][0]["payload"]
+    assert first["ok"] is False and "verifier error" in first["result"]
+    verifies = [e["payload"] for e in events if e["type"] == "verify"]
+    assert verifies[0]["healthy"] is False and "verifier error: RuntimeError" in verifies[0]["reason"]
+
+
+@pytest.mark.parametrize("bad_args", [{}, {"summary": 5}, {"summary": "ok", "extra": 1}])
+def test_finish_arguments_are_validated_before_verify(tmp_path, bad_args):
+    calls = []
+
+    def verify():
+        calls.append(1)
+        return HEALTHY
+
+    agent, trace, _, _ = make_agent(
+        tmp_path,
+        [reply(calls=[("finish", bad_args)]), reply(calls=[("finish", {"summary": "good"})])],
+        verify=verify,
+    )
+    res = agent.run("i", "x", run_id="r1")
+    first = [e for e in trace.events(run_id="r1") if e["type"] == "tool_result"][0]["payload"]
+    assert first["ok"] is False and first["result"].startswith("error:")
+    assert calls == [1]  # verify only ran for the valid finish
+    assert res.success and res.steps == 2 and res.summary == "good"
+
+
+def test_finish_empty_summary_still_accepted(tmp_path):
+    agent, _, _, _ = make_agent(tmp_path, [reply(calls=[("finish", {"summary": ""})])])
+    res = agent.run("i", "x")
+    assert res.success and res.summary == "(no summary)"
+
+
+def test_resume_finished_run_returns_stored_result(tmp_path):
+    agent, trace, _, llm = make_agent(tmp_path, [reply(calls=[("finish", {"summary": "done it"})])])
+    res = agent.run("i", "x", run_id="r1")
+    llm2 = ScriptedLLM([reply(calls=[("get_service_status", {})])])
+    agent2, trace2, _, _ = make_agent(tmp_path, [], llm=llm2)
+    again = agent2.resume("r1")
+    assert again == res
+    assert llm2.calls == []
+    assert [e["type"] for e in trace2.events(run_id="r1")].count("run_end") == 1
+
+
+def test_resume_step_limit_run_returns_stored_result(tmp_path):
+    agent, trace, _, _ = make_agent(tmp_path, [reply(calls=[("get_service_status", {})])] * 5, max_steps=2)
+    res = agent.run("i", "x", run_id="r1")
+    assert res.stop_reason == "step_limit"
+    llm2 = ScriptedLLM([reply(calls=[("get_service_status", {})])])
+    agent2, trace2, _, _ = make_agent(tmp_path, [], llm=llm2, max_steps=10)
+    again = agent2.resume("r1")
+    assert again == res and not again.success
+    assert llm2.calls == []
+    assert [e["type"] for e in trace2.events(run_id="r1")].count("run_end") == 1

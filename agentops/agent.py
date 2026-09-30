@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from agentops import config
 from agentops.policy import PolicyError
 from agentops.tools import ToolError, truncate
+from agentops.verifier import VerifyResult
 
 
 @dataclass
@@ -47,6 +48,11 @@ class Agent:
         return self._loop(run_id, messages, state)
 
     def resume(self, run_id: str) -> RunResult:
+        ended = [e for e in self.trace.events(run_id=run_id) if e["type"] == "run_end"]
+        if ended:
+            p = ended[-1]["payload"]
+            return RunResult(run_id, p["success"], p["stop_reason"], p["steps"], p["tokens"], p["cost"],
+                             p["summary"])
         cp = self.checkpoints.latest(run_id)
         if cp is None:
             raise ValueError(f"no checkpoint for run {run_id}")
@@ -129,7 +135,16 @@ class Agent:
             step=step, incident_id=inc)
 
         if call.name == "finish" and "finish" in self.allowed_tools:
-            verdict = self.verify_fn()
+            try:
+                summary = self.registry.call("finish", args, self.allowed_tools)
+            except ToolError as e:
+                result = f"error: {e}"
+                record(False, result)
+                return result, False, None
+            try:
+                verdict = self.verify_fn()
+            except Exception as e:
+                verdict = VerifyResult(False, f"verifier error: {type(e).__name__}")
             self.trace.event(run_id, "verify", {"healthy": verdict.healthy, "reason": verdict.reason},
                              step=step, incident_id=inc)
             if not verdict.healthy:
@@ -137,7 +152,7 @@ class Agent:
                 record(False, msg)
                 return msg, False, None
             record(True, "Incident closed.")
-            return "Incident closed.", True, str(args.get("summary", "")) or "(no summary)"
+            return "Incident closed.", True, summary or "(no summary)"
 
         try:
             result = truncate(self.registry.call(call.name, args, self.allowed_tools))
