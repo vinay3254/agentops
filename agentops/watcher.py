@@ -4,7 +4,7 @@ import time
 
 from agentops import config
 from agentops.handlers import HandlerResult
-from agentops.verifier import verify
+from agentops.verifier import VerifyResult, verify
 
 
 class Watcher:
@@ -17,8 +17,14 @@ class Watcher:
         self.sleep = sleep
         self._fail = 0
 
+    def _verify(self) -> VerifyResult:
+        try:
+            return self.verify_fn()
+        except Exception as e:
+            return VerifyResult(False, f"verifier error: {type(e).__name__}")
+
     def tick(self) -> str | None:
-        result = self.verify_fn()
+        result = self._verify()
         if result.healthy:
             self._fail = 0
             return None
@@ -31,18 +37,24 @@ class Watcher:
     def handle(self, symptom: str) -> str:
         incident_id = f"{self.agent_name}-{self.fault or 'live'}-{int(time.time() * 1000)}"
         self.trace.open_incident(incident_id, symptom, self.agent_name, self.fault)
+        closed = False
         try:
-            out = self.handler(incident_id, symptom)
-        except Exception as e:
-            out = HandlerResult(0, 0, 0.0, f"error:{type(e).__name__}")
-        resolved = self._confirm_healthy()
-        self.trace.close_incident(incident_id, "resolved" if resolved else "unresolved",
-                                  out.stop_reason, out.steps, out.tokens, out.cost)
+            try:
+                out = self.handler(incident_id, symptom)
+            except Exception as e:
+                out = HandlerResult(0, 0, 0.0, f"error:{type(e).__name__}")
+            resolved = self._confirm_healthy()
+            self.trace.close_incident(incident_id, "resolved" if resolved else "unresolved",
+                                      out.stop_reason, out.steps, out.tokens, out.cost)
+            closed = True
+        finally:
+            if not closed:
+                self.trace.close_incident(incident_id, "unresolved", "interrupted", 0, 0, 0.0)
         return incident_id
 
     def _confirm_healthy(self) -> bool:
         for i in range(config.POLLS_TO_CLOSE):
-            if not self.verify_fn().healthy:
+            if not self._verify().healthy:
                 return False
             if i < config.POLLS_TO_CLOSE - 1:
                 self.sleep(1.0)

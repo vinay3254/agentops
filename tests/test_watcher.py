@@ -67,3 +67,63 @@ def test_run_forever_stops_on_event(tmp_path):
     stop = threading.Event()
     stop.set()
     w.run_forever(stop)  # returns immediately
+
+
+def _raising_verify(raise_on, then=H):
+    """verify_fn that raises RuntimeError on the given 1-based call numbers, else returns scripted results."""
+    state = {"n": 0}
+
+    def fn():
+        state["n"] += 1
+        if state["n"] in raise_on:
+            raise RuntimeError("verifier broke")
+        return then if not callable(then) else then(state["n"])
+    return fn
+
+
+def _watcher(tmp_path, verify_fn, handler=None):
+    trace = TraceStore(connect(tmp_path / "v.db"))
+    calls = []
+
+    def default_handler(incident_id, symptom):
+        calls.append((incident_id, symptom))
+        return HandlerResult(steps=3, tokens=100, cost=0.01, stop_reason="finished")
+
+    w = Watcher(handler or default_handler, trace, agent_name="agent", fault="crash",
+                verify_fn=verify_fn, sleep=lambda s: None)
+    return w, trace, calls
+
+
+def test_verifier_exception_during_confirmation_leaves_incident_unresolved(tmp_path):
+    # calls: 1=U, 2=U (opens), 3=raises during confirmation
+    def seq(n):
+        return U() if n <= 2 else H
+    w, trace, _ = _watcher(tmp_path, _raising_verify({3}, then=seq))
+    w.tick()
+    inc = w.tick()
+    row = trace.incident(inc)
+    assert row["status"] == "unresolved" and row["status"] != "open"
+
+
+def test_verifier_exception_in_tick_counts_as_failed_poll(tmp_path):
+    w, trace, calls = _watcher(tmp_path, _raising_verify({1, 2}))
+    assert w.tick() is None
+    inc = w.tick()
+    assert inc is not None and len(calls) == 1
+    assert calls[0][1].startswith("verifier error")
+    assert trace.incident(inc)["status"] == "resolved"
+
+
+def test_keyboard_interrupt_closes_incident_interrupted(tmp_path):
+    import pytest
+
+    def interrupt(incident_id, symptom):
+        raise KeyboardInterrupt
+
+    w, trace, _ = _watcher(tmp_path, lambda: U(), handler=interrupt)
+    w.tick()
+    with pytest.raises(KeyboardInterrupt):
+        w.tick()
+    row = trace.incidents()[0]
+    assert row["status"] == "unresolved" and row["stop_reason"] == "interrupted"
+    assert row["steps"] == 0 and row["tokens"] == 0 and row["cost"] == 0
