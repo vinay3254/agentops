@@ -9,10 +9,10 @@ def scrub(text: str | None) -> str | None:
     """Scrub OPENROUTER_API_KEY from text, handling JSON-escaped forms.
 
     Returns None if text is None.
-    If OPENROUTER_API_KEY is at least 8 chars, replaces:
-    - The raw key
-    - json.dumps(key)[1:-1] (JSON-escaped form)
-    - json.dumps(key, ensure_ascii=False)[1:-1] (JSON-escaped form with ensure_ascii=False)
+    If OPENROUTER_API_KEY is at least 8 chars, replaces (in order to avoid invalid escapes):
+    1. json.dumps(key, ensure_ascii=False)[1:-1] (JSON-escaped form with ensure_ascii=False)
+    2. json.dumps(key)[1:-1] (JSON-escaped form)
+    3. The raw key (last, to avoid creating invalid escape sequences)
     """
     if text is None:
         return None
@@ -21,19 +21,21 @@ def scrub(text: str | None) -> str | None:
     if len(key) < 8:
         return text
 
-    # Replace raw key
-    text = text.replace(key, "***")
-
-    # Replace JSON-escaped forms
+    # Replace JSON-escaped forms FIRST to avoid creating invalid escape sequences
     # json.dumps adds quotes around the string and escapes special characters
-    json_escaped = json.dumps(key)[1:-1]  # Remove the quotes added by json.dumps
-    if json_escaped != key:  # Only replace if different (i.e., has escaped chars)
+
+    # First: Replace with ensure_ascii=False form
+    json_escaped_no_ascii = json.dumps(key, ensure_ascii=False)[1:-1]
+    if json_escaped_no_ascii:
+        text = text.replace(json_escaped_no_ascii, "***")
+
+    # Second: Replace standard json.dumps form
+    json_escaped = json.dumps(key)[1:-1]
+    if json_escaped and json_escaped != json_escaped_no_ascii:
         text = text.replace(json_escaped, "***")
 
-    # Also try with ensure_ascii=False
-    json_escaped_no_ascii = json.dumps(key, ensure_ascii=False)[1:-1]
-    if json_escaped_no_ascii != key and json_escaped_no_ascii != json_escaped:
-        text = text.replace(json_escaped_no_ascii, "***")
+    # Last: Replace raw key
+    text = text.replace(key, "***")
 
     return text
 

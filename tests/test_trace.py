@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from agentops.db import connect
 from agentops.trace import TraceStore, scrub
 
@@ -77,3 +81,57 @@ def test_scrub_short_key_not_replaced(tmp_path, monkeypatch):
     raw = conn.execute("SELECT payload FROM events").fetchone()[0]
     assert "short" in raw
     assert "***" not in raw
+
+
+@pytest.mark.parametrize("key", [
+    '"abcdefgh',  # starts with quote
+    'abcdefgh\\',  # ends with backslash
+    'sk-or-"quoted"-back\\slash-99999',  # mixed special chars
+    'sk-or-é-ü-123456789',  # non-ASCII
+    'plain-key-123456789',  # plain ASCII
+])
+def test_scrubbing_maintains_json_validity(tmp_path, monkeypatch, key):
+    """Test that scrubbing produces valid JSON and removes all key forms."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", key)
+    conn, store = make(tmp_path)
+
+    # Test with key at start, middle, and end of value
+    text_variants = [
+        f"{key} rest of text",
+        f"start of text {key} middle",
+        f"start {key}",
+    ]
+
+    for idx, text in enumerate(text_variants):
+        payload = {"text": text}
+        store.event("r", "llm_call", payload)
+
+    # Get raw stored JSON from database
+    rows = conn.execute("SELECT payload FROM events WHERE run_id=?", ("r",)).fetchall()
+
+    for raw_json in rows:
+        raw_payload_str = raw_json[0]
+
+        # (1) Raw stored payload must decode as valid JSON
+        decoded = json.loads(raw_payload_str)
+        assert isinstance(decoded, dict)
+        assert "text" in decoded
+
+        # (2) Must not contain any form of the key
+        assert key not in raw_payload_str  # raw key
+
+        # Also check JSON-escaped forms
+        json_escaped = json.dumps(key)[1:-1]
+        if json_escaped:
+            assert json_escaped not in raw_payload_str
+
+        json_escaped_no_ascii = json.dumps(key, ensure_ascii=False)[1:-1]
+        if json_escaped_no_ascii and json_escaped_no_ascii != json_escaped:
+            assert json_escaped_no_ascii not in raw_payload_str
+
+    # (3) store.events() must successfully decode and return payload
+    events = store.events(run_id="r")
+    assert len(events) == 3
+    for event in events:
+        assert "text" in event["payload"]
+        assert "***" in event["payload"]["text"]
