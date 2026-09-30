@@ -3,15 +3,19 @@ from __future__ import annotations
 import json
 import time
 
+from agentops.trace import scrub
+
 
 class CheckpointStore:
     def __init__(self, conn):
         self.conn = conn
 
     def save(self, run_id, step, messages, state):
+        messages_json = scrub(json.dumps(messages, default=str))
+        state_json = scrub(json.dumps(state))
         self.conn.execute(
             "INSERT OR REPLACE INTO checkpoints(run_id, step, messages, state, ts) VALUES(?,?,?,?,?)",
-            (run_id, step, json.dumps(messages, default=str), json.dumps(state), time.time()),
+            (run_id, step, messages_json, state_json, time.time()),
         )
         self.conn.commit()
 

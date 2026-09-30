@@ -1,5 +1,5 @@
 from agentops.db import connect
-from agentops.trace import TraceStore
+from agentops.trace import TraceStore, scrub
 
 
 def make(tmp_path):
@@ -37,3 +37,43 @@ def test_incident_lifecycle(tmp_path):
     assert row["status"] == "resolved" and row["steps"] == 4 and row["closed"] >= row["opened"]
     assert store.incidents()[0]["id"] == "i1"
     assert store.incident("missing") is None
+
+
+def test_api_key_with_quotes_and_backslash(tmp_path, monkeypatch):
+    key = 'sk-or-"quoted"-back\\slash-99999'
+    monkeypatch.setenv("OPENROUTER_API_KEY", key)
+    conn, store = make(tmp_path)
+    store.event("r", "llm_call", {"text": f"the key is {key}"})
+    raw = conn.execute("SELECT payload FROM events").fetchone()[0]
+    assert key not in raw
+    assert "***" in raw
+    evs = store.events(run_id="r")
+    assert len(evs) == 1
+    assert "***" in evs[0]["payload"]["text"]
+
+
+def test_api_key_with_non_ascii(tmp_path, monkeypatch):
+    key = "sk-or-é-ü-123456789"
+    monkeypatch.setenv("OPENROUTER_API_KEY", key)
+    conn, store = make(tmp_path)
+    store.event("r", "llm_call", {"text": f"the key is {key}"})
+    raw = conn.execute("SELECT payload FROM events").fetchone()[0]
+    assert key not in raw
+    assert "***" in raw
+    evs = store.events(run_id="r")
+    assert len(evs) == 1
+    assert "***" in evs[0]["payload"]["text"]
+
+
+def test_scrub_none_returns_none(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-secret-123456789")
+    assert scrub(None) is None
+
+
+def test_scrub_short_key_not_replaced(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "short")
+    conn, store = make(tmp_path)
+    store.event("r", "llm_call", {"text": "the key is short"})
+    raw = conn.execute("SELECT payload FROM events").fetchone()[0]
+    assert "short" in raw
+    assert "***" not in raw

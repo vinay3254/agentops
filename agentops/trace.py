@@ -5,10 +5,36 @@ import os
 import time
 
 
-def _scrub(text: str) -> str:
+def scrub(text: str | None) -> str | None:
+    """Scrub OPENROUTER_API_KEY from text, handling JSON-escaped forms.
+
+    Returns None if text is None.
+    If OPENROUTER_API_KEY is at least 8 chars, replaces:
+    - The raw key
+    - json.dumps(key)[1:-1] (JSON-escaped form)
+    - json.dumps(key, ensure_ascii=False)[1:-1] (JSON-escaped form with ensure_ascii=False)
+    """
+    if text is None:
+        return None
+
     key = os.getenv("OPENROUTER_API_KEY", "")
-    if len(key) >= 8:
-        text = text.replace(key, "***")
+    if len(key) < 8:
+        return text
+
+    # Replace raw key
+    text = text.replace(key, "***")
+
+    # Replace JSON-escaped forms
+    # json.dumps adds quotes around the string and escapes special characters
+    json_escaped = json.dumps(key)[1:-1]  # Remove the quotes added by json.dumps
+    if json_escaped != key:  # Only replace if different (i.e., has escaped chars)
+        text = text.replace(json_escaped, "***")
+
+    # Also try with ensure_ascii=False
+    json_escaped_no_ascii = json.dumps(key, ensure_ascii=False)[1:-1]
+    if json_escaped_no_ascii != key and json_escaped_no_ascii != json_escaped:
+        text = text.replace(json_escaped_no_ascii, "***")
+
     return text
 
 
@@ -17,7 +43,7 @@ class TraceStore:
         self.conn = conn
 
     def event(self, run_id, type, payload, step=0, incident_id=None, tokens=0, cost=0.0):
-        body = _scrub(json.dumps(payload, default=str))
+        body = scrub(json.dumps(payload, default=str))
         self.conn.execute(
             "INSERT INTO events(run_id, incident_id, step, type, payload, tokens, cost, ts)"
             " VALUES(?,?,?,?,?,?,?,?)",
@@ -44,7 +70,7 @@ class TraceStore:
     def open_incident(self, incident_id, symptom, agent, fault=None):
         self.conn.execute(
             "INSERT INTO incidents(id, opened, symptom, agent, fault, status) VALUES(?,?,?,?,?,'open')",
-            (incident_id, time.time(), _scrub(symptom), agent, fault),
+            (incident_id, time.time(), scrub(symptom), agent, fault),
         )
         self.conn.commit()
 
