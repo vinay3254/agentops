@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import posixpath
 import re
 import shlex
@@ -21,7 +22,8 @@ ENV_ALLOWLIST = {
     ("gateway", "API_URL"): "GATEWAY_API_URL",
 }
 ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9:/._-]{1,200}$")
-SECRET_NAME_RE = re.compile(r"(SECRET|PASSWORD|TOKEN|KEY|PASS)")
+SECRET_NAME_RE = re.compile(r"(SECRET|PASSWORD|TOKEN|KEY|PASS|CRED|AUTH|PRIVATE|DSN|CERT|COOKIE|SESSION)")
+PS_FIELDS_ALLOWED = {"pid", "ppid", "%cpu", "%mem", "cmd", "comm", "args", "etime", "stat", "user", "rss", "vsz", "time"}
 
 
 def check_service(name: str) -> str:
@@ -38,7 +40,7 @@ def _check_read_path(path: str) -> None:
         raise PolicyError(f"path outside allowed directories {READ_PREFIXES}: {path}")
 
 
-def _check_file_args(args: list[str], flag_re: str, need_path: bool) -> None:
+def _check_file_args(args: list[str], flag_re: str, need_path: bool, check_creds: bool = False) -> None:
     paths = 0
     for a in args:
         if a.startswith("-"):
@@ -48,15 +50,44 @@ def _check_file_args(args: list[str], flag_re: str, need_path: bool) -> None:
             continue
         else:
             _check_read_path(a)
+            if check_creds:
+                _check_credential_file(a)
             paths += 1
     if need_path and paths == 0:
         raise PolicyError("a file path is required")
 
 
+def _check_credential_file(path: str) -> None:
+    """Deny reading credential files for cat/tail."""
+    norm = posixpath.normpath(path)
+    basename = posixpath.basename(norm)
+
+    # Check if path is under /etc/ssl/private
+    if norm == "/etc/ssl/private" or norm.startswith("/etc/ssl/private/"):
+        raise PolicyError(f"credential file not allowed: {path}")
+
+    # Check basename patterns
+    patterns = ["shadow*", "gshadow*", ".env*", "*.pem", "*.key", "id_rsa*", "sudoers*"]
+    for pattern in patterns:
+        if fnmatch.fnmatch(basename.lower(), pattern):
+            raise PolicyError(f"credential file not allowed: {path}")
+
+
 def _ps(args):
-    for a in args:
-        if not re.fullmatch(r"-?[A-Za-z0-9,=%]+", a):
-            raise PolicyError(f"ps argument not allowed: {a}")
+    """Allow: ps, ps aux, ps -ef, ps -eo pid,ppid,%cpu,..."""
+    if args == []:
+        return
+    if args == ["aux"]:
+        return
+    if args == ["-ef"]:
+        return
+    if len(args) >= 2 and args[0] == "-eo":
+        fields = args[1].split(",")
+        for field in fields:
+            if not field or field not in PS_FIELDS_ALLOWED:
+                raise PolicyError(f"ps field not allowed: {field}")
+        return
+    raise PolicyError(f"ps arguments not allowed: {' '.join(args)}")
 
 
 def _exact(allowed: list[list[str]]):
@@ -72,8 +103,8 @@ _VALIDATORS = {
     "df": _exact([[], ["-h"]]),
     "env": _exact([[]]),
     "ls": lambda a: _check_file_args(a, r"-[alhtrRS1]+", need_path=False),
-    "cat": lambda a: _check_file_args(a, r"(?!)", need_path=True),
-    "tail": lambda a: _check_file_args(a, r"-n|-\d+", need_path=True),
+    "cat": lambda a: _check_file_args(a, r"(?!)", need_path=True, check_creds=True),
+    "tail": lambda a: _check_file_args(a, r"-n|-\d+", need_path=True, check_creds=True),
 }
 
 
@@ -126,10 +157,29 @@ def check_pid(pid) -> int:
 
 def redact_env(text: str) -> str:
     out = []
+    previous_redacted = False
+
     for line in text.splitlines():
-        name, sep, _ = line.partition("=")
-        if sep and SECRET_NAME_RE.search(name.upper()):
-            out.append(f"{name}=***")
+        name, sep, value = line.partition("=")
+
+        # A new variable must: have valid identifier name, have =, and have at least one char value
+        is_new_var = sep and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name) and value
+
+        if is_new_var:
+            # This is a new variable definition
+            if SECRET_NAME_RE.search(name.upper()):
+                out.append(f"{name}=***")
+                previous_redacted = True
+            else:
+                # Redact URL credentials in the value
+                redacted_value = re.sub(r"(://)[^/@\s:]*:[^@\s]*@", r"\1***@", value)
+                out.append(f"{name}={redacted_value}")
+                previous_redacted = False
         else:
-            out.append(line)
+            # This is a continuation line
+            if previous_redacted:
+                out.append("***")
+            else:
+                out.append(line)
+
     return "\n".join(out)

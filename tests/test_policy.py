@@ -76,3 +76,64 @@ def test_redact_env():
     out = policy.redact_env(text)
     assert "abc" not in out and "DB_PASSWORD=***" in out and "AUTH_TOKEN=***" in out
     assert "REDIS_URL=redis://redis:6379/0" in out and "PATH=/bin" in out
+
+
+# Fix round 1 tests
+
+# Issue 1: ps command restrictions
+@pytest.mark.parametrize("cmd", [
+    "ps aux", "ps -ef", "ps -eo pid,ppid,%cpu,cmd", "ps -eo pid,cmd", "ps",
+])
+def test_ps_allowed(cmd):
+    policy.parse_diagnostic(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "ps e", "ps auxe", "ps aeww", "ps -eo pid,cmd,environ", "ps -eo pid,cmd,",
+])
+def test_ps_denied(cmd):
+    with pytest.raises(PolicyError):
+        policy.parse_diagnostic(cmd)
+
+
+# Issue 2: cat and tail restrictions on credential files
+@pytest.mark.parametrize("cmd", [
+    "cat /etc/shadow", "cat /etc/gshadow", "cat /app/.env", "cat /app/key.pem",
+    "tail -n 5 /etc/shadow", "cat /etc/./shadow", "cat /data/x /etc/shadow",
+    "cat /etc/ssl/private/k",
+])
+def test_cat_tail_denied_credentials(cmd):
+    with pytest.raises(PolicyError):
+        policy.parse_diagnostic(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "cat /etc/passwd", "cat /app/api/app.py", "tail -n 50 /data/audit.log", "ls /etc",
+])
+def test_cat_tail_allowed_safe(cmd):
+    policy.parse_diagnostic(cmd)
+
+
+# Issue 3: redact_env enhancements
+def test_redact_env_extended_patterns():
+    text = "CREDENTIALS=secret1\nAUTHORIZATION=Bearer token\nMY_DSN=value"
+    out = policy.redact_env(text)
+    assert "CREDENTIALS=***" in out
+    assert "AUTHORIZATION=***" in out
+    assert "MY_DSN=***" in out
+
+
+def test_redact_env_multiline():
+    text = "PRIVATE_KEY=-----BEGIN\nMIIEabc=\n-----END"
+    out = policy.redact_env(text)
+    lines = out.split("\n")
+    assert lines[0] == "PRIVATE_KEY=***"
+    assert lines[1] == "***"
+    assert lines[2] == "***"
+
+
+def test_redact_env_url_credentials():
+    text = "DATABASE_URL=postgres://u:pw@h/db"
+    out = policy.redact_env(text)
+    assert "DATABASE_URL=postgres://***@h/db" in out
+    assert "u:pw" not in out
