@@ -14,8 +14,32 @@ class BaselineResult:
     stop_reason: str
 
 
-def run(executor, trace, incident_id, verify_fn=verify, max_attempts=3, settle_s=4.0,
+def _settle(verify_fn, settle_s, sleep):
+    """Poll verify_fn until healthy or settle_s seconds elapsed. Always verifies at least once."""
+    deadline = time.monotonic() + settle_s
+    while True:
+        result = verify_fn()
+        if result.healthy or time.monotonic() >= deadline:
+            return result
+        sleep(1.0)
+
+
+def run(executor, trace, incident_id, verify_fn=verify, max_attempts=3, settle_s=12.0,
         sleep=time.sleep) -> BaselineResult:
+    """Run rule-based recovery actions until system is healthy or max_attempts exceeded.
+
+    Args:
+        executor: Service executor with status(), start(), restart() methods
+        trace: TraceStore for recording actions
+        incident_id: Incident ID for trace events
+        verify_fn: Function that returns VerifyResult; defaults to verify()
+        max_attempts: Maximum number of recovery attempts
+        settle_s: Maximum seconds to poll after start/restart (polling window, not fixed sleep)
+        sleep: Sleep function (default time.sleep)
+
+    Returns:
+        BaselineResult with success status, step count, and stop reason
+    """
     steps = 0
 
     def act(name: str, service: str) -> None:
@@ -29,11 +53,12 @@ def run(executor, trace, incident_id, verify_fn=verify, max_attempts=3, settle_s
             executor.restart(service)
 
     for _ in range(max_attempts):
+        started = False
         for svc, info in executor.status().items():
             if info["state"] != "running":
                 act("start_service", svc)
-        sleep(settle_s)
-        result = verify_fn()
+                started = True
+        result = _settle(verify_fn, settle_s, sleep) if started else verify_fn()
         if result.healthy:
             return BaselineResult(True, steps, "healthy")
 
@@ -41,8 +66,7 @@ def run(executor, trace, incident_id, verify_fn=verify, max_attempts=3, settle_s
         targets = [first] if first in config.SERVICES else list(config.APP_SERVICES)
         for svc in targets:
             act("restart_service", svc)
-        sleep(settle_s)
-        result = verify_fn()
+        result = _settle(verify_fn, settle_s, sleep)
         if result.healthy:
             return BaselineResult(True, steps, "healthy")
     return BaselineResult(False, steps, "max_attempts")
