@@ -64,7 +64,9 @@ Each unit has one purpose and a narrow interface. Paths are relative to the repo
 - `api` (FastAPI): create and read orders, stores in Redis, writes audit lines to `/data/audit.log`. Exposes `/health` (checks Redis, checks `/data` writable) and `/metrics` (JSON: request count, p95 latency).
 - `worker` (Python): consumes an order queue from Redis, writes results to `/data`. Exposes `/health`.
 - `redis`: backing store.
-- `/data` is a size-limited tmpfs mounted in `api` and `worker` (enables the disk-full fault).
+- `/data` is a named Docker volume mounted in `api` and `worker`. Services enforce an app-level quota (`DATA_QUOTA_BYTES`, 8 MB) so disk-full state survives a container restart (a tmpfs would be wiped by restart and make the fault trivial to fix).
+- `api` runs with `cpus: 0.5`. Its `/health` runs a fixed 20 ms CPU probe and reports degraded when the probe takes over 150 ms.
+- `api` reads `DEBUG_SPIN` at startup. When greater than 0, it spawns a process tree of that many busy-loop workers.
 - Contract: every app service returns `200 {"status":"ok"}` on `/health` when healthy and non-200 otherwise.
 
 ### 4.2 Chaos injector (`chaos/`)
@@ -75,8 +77,8 @@ Interface: `inject(fault_type)`, `reset()`. `reset()` restores the clean stack a
 | `crash` | `docker kill api` | Container exited; start or restart `api` |
 | `bad_config` | `api` restarted with wrong `REDIS_URL` | Logs show connection errors; correct env and restart |
 | `dependency_down` | `docker stop redis` | `api` and `worker` unhealthy because of Redis; start `redis` |
-| `disk_full` | Fill `/data` tmpfs in `api` | Logs show `ENOSPC`; clean files under `/data` |
-| `cpu_hog` | Spawn busy loop process in `api` | Latency high; `ps` shows process; kill it |
+| `disk_full` | Write a 10 MB file to `/data` in `api` (over the 8 MB quota) | Logs show `data quota exceeded`; remove the file under `/data` |
+| `cpu_hog` | Recreate `api` with `DEBUG_SPIN=8` | Health reports degraded CPU probe; `ps` shows `spin.py` tree; kill it or set `DEBUG_SPIN=0` |
 
 ### 4.3 Verifier (`runtime/verifier.py`)
 Pure Python, no LLM. Checks: all `/health` endpoints return 200, plus a synthetic transaction (POST an order via gateway, read it back, confirm worker processed it, latency under threshold). Returns `healthy: bool` and a failure reason. Used by the watcher, eval harness, and the agent's `verify_health` tool.
@@ -100,9 +102,9 @@ MVP tools for the Incident Responder:
 - `finish(summary)`.
 
 ### 4.6 Executor and policy (`runtime/executor.py`)
-The only code path that touches Docker. Uses the Docker SDK (`docker` Python package) scoped to the Compose project `agentops`. The agent never gets a host shell.
+The only code path that touches Docker. Uses the Docker SDK (`docker` Python package) for container operations, and the `docker compose` CLI (argv list, no shell, fixed project `agentops`) only to recreate a service after `set_env`. The agent never gets a host shell.
 - Service names must match the stack's service list.
-- `run_diagnostic` allowlist: `ps`, `top -bn1`, `df -h`, `ls`, `cat` (paths under `/app`, `/data`, `/etc`), `env` (values redacted for secret-like keys), `ss -tulpn`, `tail`.
+- `run_diagnostic` allowlist: `ps`, `top -bn1`, `df -h`, `ls`, `cat` (paths under `/app`, `/data`, `/etc`), `env` (values redacted for secret-like keys), `tail`.
 - No shell metacharacters (`;`, `|`, `&&`, backticks, `$(`, redirects). Arguments are passed as a list, never through a shell.
 - Every denied call returns a clear error to the agent and writes a `policy_denied` trace event.
 
@@ -122,7 +124,7 @@ SQLite table `events(id, run_id, incident_id, step, type, payload_json, tokens, 
 Polls the verifier, opens incidents, starts runs, enforces one active incident at a time in MVP. Closes the incident when the verifier reports healthy or the run ends.
 
 ### 4.11 Baseline (`baseline/runbook.py`)
-Fixed rules, no LLM: if a container is not running, start it; if a service is unhealthy, restart it; re-verify; give up after 3 attempts. Runs through the same executor and verifier so the comparison is fair. Expected outcome: fixes `crash`, fails `bad_config`, `dependency_down`, `disk_full`, `cpu_hog`.
+Fixed rules, no LLM: if a container is not running, start it; if a service is unhealthy, restart it; re-verify; give up after 3 attempts. Runs through the same executor and verifier so the comparison is fair. Expected outcome: fixes `crash` and `dependency_down` (a stopped container is started), fails `bad_config`, `disk_full`, `cpu_hog` (state survives a restart).
 
 ### 4.12 Eval harness (`eval/run_eval.py`)
 For each fault type and each of N trials (N = 3 in MVP, giving 15 agent runs and 15 baseline runs): `reset()`, `inject()`, start timer, run responder (or baseline), verify, record `success`, `MTTR`, `steps`, `tokens`, `cost`, `stop_reason`. Output: `eval/results.csv`, `eval/summary.md` (table), and plots (`matplotlib`): success rate by fault type, MTTR by fault type, agent vs baseline.
