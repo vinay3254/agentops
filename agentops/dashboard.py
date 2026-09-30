@@ -30,16 +30,27 @@ with live_tab:
         st.info("Offline mode: live stack checks are disabled.")
     else:
         from agentops.executor import Executor
-        from agentops.verifier import verify
+        from agentops.verifier import VerifyResult, verify
 
-        try:
-            status = Executor().status()
+        auto = st.toggle("Auto-refresh every 3 s")
+        refresh = st.button("Check health now")
+        if auto or refresh or "health" not in st.session_state:
+            try:
+                st.session_state["status"] = Executor().status()
+            except Exception as e:
+                st.session_state["status"] = f"Docker unavailable: {e}"
+            try:
+                st.session_state["health"] = verify()
+            except Exception as e:
+                st.session_state["health"] = VerifyResult(False, f"verifier error: {type(e).__name__}")
+        status = st.session_state["status"]
+        if isinstance(status, str):
+            st.error(status)
+        else:
             cols = st.columns(len(status))
             for col, (svc, info) in zip(cols, status.items()):
                 col.metric(svc, info["state"])
-        except Exception as e:
-            st.error(f"Docker unavailable: {e}")
-        result = verify()
+        result = st.session_state["health"]
         if result.healthy:
             st.success("Stack healthy")
         else:
@@ -47,12 +58,19 @@ with live_tab:
         c1, c2, c3 = st.columns([2, 1, 1])
         fault = c1.selectbox("Fault", chaos.FAULTS)
         if c2.button("Inject fault"):
-            chaos.inject(fault)
-            st.toast(f"Injected {fault}")
+            try:
+                with st.spinner(f"Injecting {fault}..."):
+                    chaos.inject(fault)
+                st.toast(f"Injected {fault}")
+            except Exception as e:
+                st.error(f"Inject failed: {type(e).__name__}: {e}")
         if c3.button("Reset stack"):
-            chaos.reset()
-            st.toast("Stack reset")
-        auto = st.toggle("Auto-refresh every 3 s")
+            try:
+                with st.spinner("Resetting stack (up to 90 s)..."):
+                    chaos.reset()
+                st.toast("Stack reset")
+            except Exception as e:
+                st.error(f"Reset failed: {type(e).__name__}: {e}")
 
 with traces_tab:
     incidents = trace.incidents()
