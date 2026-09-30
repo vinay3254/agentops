@@ -27,11 +27,16 @@ def build_registry(executor, verify_fn) -> ToolRegistry:
     def get_metrics(service):
         if service != "api":
             raise ToolError("only the api service exposes /metrics")
-        return httpx.get(f"{config.service_url('api')}/metrics", timeout=3).text
+        try:
+            resp = httpx.get(f"{config.service_url('api')}/metrics", timeout=3)
+        except httpx.HTTPError as e:
+            raise ToolError(f"api /metrics unreachable: {type(e).__name__}")
+        if resp.status_code != 200:
+            raise ToolError(f"api /metrics returned HTTP {resp.status_code}")
+        return resp.text
 
     @reg.tool("run_diagnostic",
-              "Run a read-only command inside a service container. Allowed: ps, top -bn1, df -h, ls, cat, env, tail. "
-              "No pipes or shell syntax. Paths must be under /app, /data or /etc.",
+              "Run one read-only command inside a service container. No pipes, redirects, globs or shell syntax. Allowed: `ps` (forms: `ps`, `ps aux`, `ps -ef`, `ps -eo pid,ppid,%cpu,%mem,comm,args,etime,stat,user,rss,vsz,time` — any subset of those fields, comma separated), `top -bn1`, `df -h`, `ls [-a -l -h -t -r -R -S -1] [path]`, `cat <path>`, `tail -n N <path>`, `env` (secret values are redacted). Paths must be under /app, /data or /etc. Credential files (.env*, *.pem, *.key, shadow*, id_rsa*, sudoers*) are refused.",
               obj({"service": SERVICE, "command": {"type": "string"}}, ["service", "command"]), "read")
     def run_diagnostic(service, command):
         return executor.diagnostic(service, command)

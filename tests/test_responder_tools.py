@@ -61,3 +61,75 @@ def test_large_logs_truncate_at_limit():
     out = truncate(reg.call("read_logs", {"service": "api", "tail": 200}, ALL))
     assert len(out) <= config.TOOL_RESULT_MAX_CHARS + 60
     assert "truncated" in out
+
+
+def test_run_diagnostic_description_matches_hardened_policy():
+    """Verify description accurately reflects what's actually allowed."""
+    _, reg = make()
+    schema = reg.schemas(["run_diagnostic"])[0]
+    desc = schema["function"]["description"]
+    # Key substrings from the hardened policy implementation
+    assert "ps -eo" in desc, f"Description should mention ps -eo fields: {desc}"
+    assert "top -bn1" in desc, f"Description should mention top -bn1: {desc}"
+    assert "df -h" in desc, f"Description should mention df -h: {desc}"
+    assert "tail -n" in desc, f"Description should mention tail -n: {desc}"
+    assert "/app, /data or /etc" in desc, f"Description should specify allowed paths: {desc}"
+    assert "refused" in desc, f"Description should mention credential files are refused: {desc}"
+
+
+def test_get_metrics_handles_httpx_errors(monkeypatch):
+    """Test that httpx errors are caught and converted to ToolError."""
+    import httpx
+
+    _, reg = make()
+
+    # Test ConnectError
+    def raise_connect_error(*args, **kwargs):
+        raise httpx.ConnectError("connection failed")
+
+    monkeypatch.setattr("agentops.responder_tools.httpx.get", raise_connect_error)
+    with pytest.raises(ToolError) as exc_info:
+        reg.call("get_metrics", {"service": "api"}, ALL)
+    assert "unreachable" in str(exc_info.value)
+    assert "ConnectError" in str(exc_info.value)
+
+    # Test TimeoutException
+    def raise_timeout(*args, **kwargs):
+        raise httpx.TimeoutException("timeout")
+
+    monkeypatch.setattr("agentops.responder_tools.httpx.get", raise_timeout)
+    with pytest.raises(ToolError) as exc_info:
+        reg.call("get_metrics", {"service": "api"}, ALL)
+    assert "unreachable" in str(exc_info.value)
+    assert "TimeoutException" in str(exc_info.value)
+
+
+def test_get_metrics_handles_non_200_status(monkeypatch):
+    """Test that non-200 status codes raise ToolError."""
+    import httpx
+
+    _, reg = make()
+
+    # Mock response with 503 status
+    class MockResponse:
+        status_code = 503
+        text = "Service Unavailable"
+
+    monkeypatch.setattr("agentops.responder_tools.httpx.get", lambda *args, **kwargs: MockResponse())
+    with pytest.raises(ToolError) as exc_info:
+        reg.call("get_metrics", {"service": "api"}, ALL)
+    assert "503" in str(exc_info.value)
+
+
+def test_get_metrics_returns_text_on_success(monkeypatch):
+    """Test that successful 200 response returns the body text."""
+    _, reg = make()
+
+    # Mock successful response
+    class MockResponse:
+        status_code = 200
+        text = "requests_total 42\np95_latency_ms 150\n"
+
+    monkeypatch.setattr("agentops.responder_tools.httpx.get", lambda *args, **kwargs: MockResponse())
+    result = reg.call("get_metrics", {"service": "api"}, ALL)
+    assert result == "requests_total 42\np95_latency_ms 150\n"
