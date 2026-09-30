@@ -46,14 +46,17 @@ def _verify(client: httpx.Client) -> VerifyResult:
     if latency > config.LATENCY_THRESHOLD_S:
         return VerifyResult(False, f"synthetic order slow: {latency:.2f}s", latency)
 
-    oid = resp.json()["id"]
+    try:
+        oid = resp.json()["id"]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return VerifyResult(False, "synthetic order failed: malformed response", latency)
     deadline = time.monotonic() + config.ORDER_DONE_TIMEOUT_S
     while time.monotonic() < deadline:
         try:
             r2 = client.get(f"{gateway}/orders/{oid}")
             if r2.status_code == 200 and r2.json().get("status") == "done":
                 return VerifyResult(True, "", latency)
-        except httpx.HTTPError:
+        except (httpx.HTTPError, ValueError, AttributeError):
             pass
         time.sleep(0.2)
     return VerifyResult(False, "order not processed by worker within timeout", latency)

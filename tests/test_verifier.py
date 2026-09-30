@@ -76,3 +76,49 @@ def test_wait_healthy_times_out():
     result = wait_healthy(timeout=0.3, interval=0.05, verify_fn=lambda: VerifyResult(False, "down"))
     assert not result.healthy
     assert result.reason == "down"
+
+
+def test_synthetic_order_non_json_response():
+    def handler(request):
+        if request.url.path == "/orders" and request.method == "POST":
+            return httpx.Response(200, content=b"not json")
+        return healthy_handler(request)
+
+    result = verify(make_client(handler))
+    assert not result.healthy
+    assert result.reason.startswith("synthetic order failed")
+
+
+def test_synthetic_order_missing_id():
+    def handler(request):
+        if request.url.path == "/orders" and request.method == "POST":
+            return httpx.Response(200, json={})
+        return healthy_handler(request)
+
+    result = verify(make_client(handler))
+    assert not result.healthy
+    assert result.reason.startswith("synthetic order failed")
+
+
+def test_synthetic_order_response_non_json_polling(monkeypatch):
+    monkeypatch.setattr(config, "ORDER_DONE_TIMEOUT_S", 0.3)
+
+    def handler(request):
+        if request.url.path == "/orders/abc":
+            return httpx.Response(200, content=b"not json")
+        return healthy_handler(request)
+
+    result = verify(make_client(handler))
+    assert not result.healthy
+    assert result.reason.startswith("order not processed")
+
+
+def test_synthetic_order_500_response():
+    def handler(request):
+        if request.url.path == "/orders" and request.method == "POST":
+            return httpx.Response(500, text="Internal Server Error")
+        return healthy_handler(request)
+
+    result = verify(make_client(handler))
+    assert not result.healthy
+    assert result.reason.startswith("synthetic order failed: 500")
