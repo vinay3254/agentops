@@ -1,0 +1,54 @@
+name: agentops
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: agentops-redis
+
+  api:
+    build:
+      context: ./target
+      dockerfile: api/Dockerfile
+    container_name: agentops-api
+    environment:
+      REDIS_URL: ${API_REDIS_URL:-redis://redis:6379/0}
+      DEBUG_SPIN: ${API_DEBUG_SPIN:-0}
+      DATA_QUOTA_BYTES: "8000000"
+    volumes:
+      - api_data:/data
+    ports:
+      - "127.0.0.1:8001:8001"
+    cpus: 0.5
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: ./target
+      dockerfile: worker/Dockerfile
+    container_name: agentops-worker
+    environment:
+      REDIS_URL: ${WORKER_REDIS_URL:-redis://redis:6379/0}
+      DATA_QUOTA_BYTES: "8000000"
+    volumes:
+      - worker_data:/data
+    ports:
+      - "127.0.0.1:8002:8002"
+    depends_on:
+      - redis
+
+  gateway:
+    build:
+      context: ./target
+      dockerfile: gateway/Dockerfile
+    container_name: agentops-gateway
+    environment:
+      API_URL: ${GATEWAY_API_URL:-http://api:8001}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      - api
+
+volumes:
+  api_data: {}
+  worker_data: {}
