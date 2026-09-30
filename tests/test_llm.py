@@ -118,14 +118,23 @@ def test_missing_usage_fields_default_to_zero(usage, tokens, cost):
 
 
 @pytest.mark.parametrize("choices", [[], None])
-def test_no_choices_raises_llm_error_without_retry(choices):
+def test_no_choices_is_retried_then_raises_llm_error(choices):
     usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1, model_extra={})
-    fake = FakeOpenAI([SimpleNamespace(choices=choices, usage=usage)])
+    fake = FakeOpenAI([SimpleNamespace(choices=choices, usage=usage) for _ in range(3)])
     sleeps = []
     llm = OpenRouterClient(model="m", client=fake, sleep=sleeps.append)
-    with pytest.raises(LLMError, match="no choices"):
+    with pytest.raises(LLMError, match="no choices after 3 attempts"):
         llm.complete([], [])
-    assert len(fake.kwargs) == 1 and sleeps == []
+    assert len(fake.kwargs) == 3 and sleeps == [1, 2]
+
+
+def test_empty_choices_then_valid_response_is_returned():
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1, model_extra={})
+    fake = FakeOpenAI([SimpleNamespace(choices=[], usage=usage), fake_response("ok")])
+    sleeps = []
+    llm = OpenRouterClient(model="m", client=fake, sleep=sleeps.append)
+    assert llm.complete([], []).text == "ok"
+    assert len(fake.kwargs) == 2 and sleeps == [1]
 
 
 @pytest.mark.parametrize(

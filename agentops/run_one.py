@@ -14,14 +14,13 @@ from agentops.trial import run_trial
 from agentops.verifier import verify, wait_healthy
 
 
-def _resume(run_id: str, trace, cps) -> None:
-    from agentops.llm import OpenRouterClient
-    agent = build_responder(OpenRouterClient(), Executor(), trace, cps)
+def _resume(run_id: str, trace, cps, agent, wait_healthy_fn) -> None:
     res = agent.resume(run_id)
-    healthy = wait_healthy(timeout=30).healthy
-    incident_id = cps.latest(run_id)["state"]["incident_id"]
-    trace.close_incident(incident_id, "resolved" if healthy else "unresolved",
-                         res.stop_reason, res.steps, res.tokens, res.cost)
+    healthy = wait_healthy_fn().healthy
+    row = trace.incident(run_id)  # run_id == incident_id by construction
+    if row is not None and row["status"] == "open":
+        trace.close_incident(run_id, "resolved" if healthy else "unresolved",
+                             res.stop_reason, res.steps, res.tokens, res.cost)
     print(f"resumed {run_id}: success={res.success} steps={res.steps} healthy={healthy}")
     print(res.summary)
 
@@ -38,32 +37,38 @@ def main() -> None:
     trace, cps = TraceStore(conn), CheckpointStore(conn)
 
     if args.resume:
-        _resume(args.resume, trace, cps)
+        from agentops.llm import OpenRouterClient
+        agent = build_responder(OpenRouterClient(), Executor(), trace, cps)
+        _resume(args.resume, trace, cps, agent, lambda: wait_healthy(timeout=30))
         return
     if not args.fault:
         p.error("--fault is required unless --resume is given")
+
+    if args.crash_after_step is not None:
+        if args.mode == "baseline":
+            p.error("--crash-after-step only applies to --mode agent")
+        if args.crash_after_step < 1:
+            p.error("--crash-after-step must be >= 1")
 
     llm = None
     if args.mode == "agent":
         from agentops.llm import OpenRouterClient
         llm = OpenRouterClient()
 
-    step_hook = None
-    if args.crash_after_step:
-        def step_hook(step):
-            if step >= args.crash_after_step:
-                print(f"simulated crash after step {step}; resume with --resume <incident id shown in dashboard>")
-                os._exit(1)
-
     handler = make_handler(args.mode, llm=llm, trace=trace, checkpoints=cps)
-    if step_hook and args.mode == "agent":
-        inner = handler
-
-        def handler(incident_id, symptom, _inner=inner):
+    if args.crash_after_step is not None:
+        def handler(incident_id, symptom):
+            from agentops.handlers import HandlerResult
             from agentops.responder import incident_context
+
+            def step_hook(step):
+                if step >= args.crash_after_step:
+                    print(f"simulated crash after step {step}; "
+                          f"resume with: python -m agentops.run_one --resume {incident_id}", flush=True)
+                    os._exit(1)
+
             agent = build_responder(llm, Executor(), trace, cps, step_hook=step_hook)
             res = agent.run(incident_id, incident_context(incident_id, symptom), run_id=incident_id)
-            from agentops.handlers import HandlerResult
             return HandlerResult(res.steps, res.tokens, res.cost, res.stop_reason)
 
     result = run_trial(args.fault, args.mode, 1, handler, trace)

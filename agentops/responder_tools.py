@@ -61,7 +61,7 @@ def build_registry(executor, verify_fn) -> ToolRegistry:
     def set_env(service, key, value):
         return executor.set_env(service, key, value)
 
-    @reg.tool("cleanup_files", "Delete one file under /data/ inside api or worker. `path` must be absolute, e.g. /data/junk.bin (not a bare filename).",
+    @reg.tool("cleanup_files", "Delete one file under /data/ inside api or worker. `path` must be absolute and start with /data/, e.g. /data/<filename>.",
               obj({"service": SERVICE, "path": {"type": "string"}}, ["service", "path"]), "mutate")
     def cleanup_files(service, path):
         return executor.cleanup_files(service, path)

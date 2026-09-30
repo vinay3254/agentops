@@ -57,6 +57,11 @@ class OpenRouterClient:
                     temperature=0,
                     extra_body={"usage": {"include": True}},
                 )
+                if not getattr(resp, "choices", None):
+                    last = LLMError("provider returned no choices")
+                    if attempt < 2:
+                        self._sleep(2 ** attempt)
+                    continue
                 return self._parse(resp)
             except (openai.APIConnectionError, openai.RateLimitError, openai.InternalServerError) as e:
                 last = e
@@ -65,6 +70,8 @@ class OpenRouterClient:
             except openai.APIStatusError as e:
                 # Non-retryable (401/400/404...). Drop the SDK exception: it carries the request.
                 raise LLMError(f"LLM request rejected: HTTP {e.status_code}") from None
+        if isinstance(last, LLMError):
+            raise LLMError("provider returned no choices after 3 attempts")
         detail = f" (HTTP {last.status_code})" if isinstance(last, openai.APIStatusError) else ""
         raise LLMError(f"LLM call failed after 3 attempts: {type(last).__name__}{detail}")
 
