@@ -40,7 +40,9 @@ class OpenRouterClient:
             key = os.getenv("OPENROUTER_API_KEY")
             if not key:
                 raise LLMError("OPENROUTER_API_KEY is not set")
-            client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=key)
+            client = OpenAI(
+                base_url="https://openrouter.ai/api/v1", api_key=key, max_retries=0, timeout=60.0
+            )
         self.client = client
         self._sleep = sleep
 
@@ -60,16 +62,23 @@ class OpenRouterClient:
                 last = e
                 if attempt < 2:
                     self._sleep(2 ** attempt)
-        raise LLMError(f"LLM call failed after 3 attempts: {type(last).__name__}")
+            except openai.APIStatusError as e:
+                # Non-retryable (401/400/404...). Drop the SDK exception: it carries the request.
+                raise LLMError(f"LLM request rejected: HTTP {e.status_code}") from None
+        detail = f" (HTTP {last.status_code})" if isinstance(last, openai.APIStatusError) else ""
+        raise LLMError(f"LLM call failed after 3 attempts: {type(last).__name__}{detail}")
 
     @staticmethod
     def _parse(resp) -> LLMResponse:
+        if not getattr(resp, "choices", None):
+            raise LLMError("provider returned no choices")
         msg = resp.choices[0].message
         calls = [
             ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments or "{}")
             for tc in (msg.tool_calls or [])
         ]
-        extra = getattr(resp.usage, "model_extra", None) or {}
+        usage = getattr(resp, "usage", None)
+        extra = getattr(usage, "model_extra", None) or {}
         raw: dict = {"role": "assistant", "content": msg.content}
         if calls:
             raw["tool_calls"] = [
@@ -79,8 +88,8 @@ class OpenRouterClient:
         return LLMResponse(
             text=msg.content or "",
             tool_calls=calls,
-            prompt_tokens=resp.usage.prompt_tokens,
-            completion_tokens=resp.usage.completion_tokens,
+            prompt_tokens=getattr(usage, "prompt_tokens", None) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", None) or 0,
             cost=float(extra.get("cost") or 0.0),
             raw_message=raw,
         )

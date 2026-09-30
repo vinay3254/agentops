@@ -75,3 +75,76 @@ def test_missing_key_and_model(monkeypatch):
     monkeypatch.delenv("AGENTOPS_MODEL", raising=False)
     with pytest.raises(LLMError, match="AGENTOPS_MODEL"):
         OpenRouterClient()
+
+
+def status_error(cls, code):
+    resp = httpx.Response(code, request=httpx.Request("POST", "http://x"))
+    return cls("boom", response=resp, body=None)
+
+
+def test_real_client_constructed_without_sdk_retries(monkeypatch):
+    calls = []
+    monkeypatch.setattr("agentops.llm.load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr("agentops.llm.OpenAI", lambda **kw: calls.append(kw) or object())
+    monkeypatch.setenv("OPENROUTER_API_KEY", "k" * 10)
+    monkeypatch.setenv("AGENTOPS_MODEL", "m")
+    OpenRouterClient()
+    assert len(calls) == 1
+    assert calls[0]["max_retries"] == 0
+    assert calls[0]["timeout"] == 60.0
+    assert calls[0]["base_url"] == "https://openrouter.ai/api/v1"
+
+
+def _resp_with_usage(usage):
+    message = SimpleNamespace(content="hi", tool_calls=None)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+
+@pytest.mark.parametrize(
+    "usage, tokens, cost",
+    [
+        (None, (0, 0), 0.0),
+        (SimpleNamespace(prompt_tokens=None, completion_tokens=7, model_extra={"cost": 0.5}), (0, 7), 0.5),
+        (SimpleNamespace(prompt_tokens=3, completion_tokens=None, model_extra={"cost": 0.5}), (3, 0), 0.5),
+        (SimpleNamespace(prompt_tokens=3, completion_tokens=4, model_extra=None), (3, 4), 0.0),
+        (SimpleNamespace(prompt_tokens=3, completion_tokens=4, model_extra={"cost": None}), (3, 4), 0.0),
+    ],
+)
+def test_missing_usage_fields_default_to_zero(usage, tokens, cost):
+    llm = OpenRouterClient(model="m", client=FakeOpenAI([_resp_with_usage(usage)]), sleep=lambda s: None)
+    resp = llm.complete([], [])
+    assert (resp.prompt_tokens, resp.completion_tokens) == tokens
+    assert resp.cost == cost
+
+
+@pytest.mark.parametrize("choices", [[], None])
+def test_no_choices_raises_llm_error_without_retry(choices):
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1, model_extra={})
+    fake = FakeOpenAI([SimpleNamespace(choices=choices, usage=usage)])
+    sleeps = []
+    llm = OpenRouterClient(model="m", client=fake, sleep=sleeps.append)
+    with pytest.raises(LLMError, match="no choices"):
+        llm.complete([], [])
+    assert len(fake.kwargs) == 1 and sleeps == []
+
+
+@pytest.mark.parametrize(
+    "cls, code", [(openai.AuthenticationError, 401), (openai.BadRequestError, 400), (openai.NotFoundError, 404)]
+)
+def test_non_retryable_status_error_is_sanitized(cls, code):
+    fake = FakeOpenAI([status_error(cls, code)])
+    sleeps = []
+    llm = OpenRouterClient(model="m", client=fake, sleep=sleeps.append)
+    with pytest.raises(LLMError, match=f"HTTP {code}") as ei:
+        llm.complete([], [])
+    assert len(fake.kwargs) == 1 and sleeps == []
+    assert ei.value.__cause__ is None and ei.value.__suppress_context__ is True
+
+
+def test_exhausted_5xx_includes_status_code():
+    fake = FakeOpenAI([status_error(openai.InternalServerError, 503) for _ in range(3)])
+    sleeps = []
+    llm = OpenRouterClient(model="m", client=fake, sleep=sleeps.append)
+    with pytest.raises(LLMError, match="503"):
+        llm.complete([], [])
+    assert len(fake.kwargs) == 3 and sleeps == [1, 2]
